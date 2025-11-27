@@ -47,6 +47,7 @@ async def world_building_generator(
         target_words = data.get("target_words")
         chapter_count = data.get("chapter_count")
         character_count = data.get("character_count")
+        outline_mode = data.get("outline_mode", "one-to-many")  # 大纲模式，默认一对多
         provider = data.get("provider")
         model = data.get("model")
         enable_mcp = data.get("enable_mcp", True)  # 默认启用MCP
@@ -215,6 +216,7 @@ async def world_building_generator(
             target_words=target_words,
             chapter_count=chapter_count,
             character_count=character_count,
+            outline_mode=outline_mode,  # 设置大纲模式
             wizard_status="incomplete",
             wizard_step=1,
             status="planning"
@@ -245,6 +247,10 @@ async def world_building_generator(
                 logger.warning(f"未找到order_index=1的全局预设风格，项目 {project.id} 未设置默认风格")
         except Exception as e:
             logger.warning(f"设置默认写作风格失败: {e}，不影响项目创建")
+        
+        # 更新向导步骤状态为1（世界观已完成）
+        project.wizard_step = 1
+        await db.commit()
         
         db_committed = True
         
@@ -824,8 +830,9 @@ async def characters_generator(
         logger.info(f"  - 创建角色关系：{relationships_created} 条")
         logger.info(f"  - 创建组织成员：{members_created} 条")
         
-        # 更新项目的角色数量
+        # 更新项目的角色数量和向导步骤状态为2（角色已完成）
         project.character_count = len(created_characters)
+        project.wizard_step = 2
         logger.info(f"✅ 更新项目角色数量: {project.character_count}")
         
         await db.commit()
@@ -1012,39 +1019,82 @@ async def outline_generator(
         
         logger.info(f"✅ 成功创建{len(created_outlines)}个大纲节点")
         
-        # 向导流程中不展开大纲，避免等待时间过长
-        # 用户可以在大纲页面手动展开需要的大纲节点
-        yield await SSEResponse.send_progress("跳过大纲展开，加快创建速度...", 85)
+        # 根据项目的大纲模式决定是否自动创建章节
+        created_chapters = []
+        if project.outline_mode == 'one-to-one':
+            # 一对一模式：自动为每个大纲创建对应的章节
+            yield await SSEResponse.send_progress("一对一模式：自动创建章节...", 50)
+            
+            for outline in created_outlines:
+                chapter = Chapter(
+                    project_id=project_id,
+                    title=outline.title,
+                    content="",  # 空内容，等待用户生成
+                    outline_id=None,  # 一对一模式下不关联outline_id
+                    chapter_number=outline.order_index,  # 使用chapter_number而不是order_index
+                    status="pending"
+                )
+                db.add(chapter)
+                created_chapters.append(chapter)
+            
+            await db.flush()
+            for chapter in created_chapters:
+                await db.refresh(chapter)
+            
+            logger.info(f"✅ 一对一模式：自动创建了{len(created_chapters)}个章节")
+            yield await SSEResponse.send_progress(f"已自动创建{len(created_chapters)}个章节", 85)
+        else:
+            # 一对多模式：跳过自动创建，用户可手动展开
+            yield await SSEResponse.send_progress("细化模式：跳过自动创建章节", 85)
+            logger.info(f"📝 细化模式：跳过章节创建，用户可在大纲页面手动展开")
         
         # 更新项目信息
-        project.chapter_count = 0  # 向导阶段不创建章节
+        project.chapter_count = len(created_chapters)  # 记录实际创建的章节数
         project.narrative_perspective = narrative_perspective
         project.target_words = target_words
         project.status = "writing"
         project.wizard_status = "completed"
-        project.wizard_step = 4
+        project.wizard_step = 3
         
         await db.commit()
         db_committed = True
         
         logger.info(f"📊 向导大纲生成完成：")
         logger.info(f"  - 创建大纲节点：{len(created_outlines)} 个")
-        logger.info(f"  - 提示：可在大纲页面手动展开为章节")
+        logger.info(f"  - 创建章节：{len(created_chapters)} 个")
+        logger.info(f"  - 大纲模式：{project.outline_mode}")
+        
+        # 构建结果消息
+        if project.outline_mode == 'one-to-one':
+            result_message = f"成功生成{len(created_outlines)}个大纲节点并自动创建{len(created_chapters)}个章节（传统模式）"
+            result_note = "已自动创建章节，可直接生成内容"
+        else:
+            result_message = f"成功生成{len(created_outlines)}个大纲节点（细化模式，可在大纲页面手动展开）"
+            result_note = "可在大纲页面展开为多个章节"
         
         # 发送结果
         yield await SSEResponse.send_result({
-            "message": f"成功生成{len(created_outlines)}个大纲节点（未展开章节，可在大纲页面手动展开）",
+            "message": result_message,
             "outline_count": len(created_outlines),
-            "chapter_count": 0,
+            "chapter_count": len(created_chapters),
+            "outline_mode": project.outline_mode,
             "outlines": [
                 {
                     "id": outline.id,
                     "order_index": outline.order_index,
                     "title": outline.title,
                     "content": outline.content[:100] + "..." if len(outline.content) > 100 else outline.content,
-                    "note": "可在大纲页面展开为章节"
+                    "note": result_note
                 } for outline in created_outlines
-            ]
+            ],
+            "chapters": [
+                {
+                    "id": chapter.id,
+                    "chapter_number": chapter.chapter_number,
+                    "title": chapter.title,
+                    "status": chapter.status
+                } for chapter in created_chapters
+            ] if created_chapters else []
         })
         
         yield await SSEResponse.send_progress("完成!", 100, "success")
@@ -1062,7 +1112,6 @@ async def outline_generator(
             logger.info("大纲生成事务已回滚（异常）")
         yield await SSEResponse.send_error(f"生成失败: {str(e)}")
 
-
 @router.post("/outline", summary="流式生成完整大纲")
 async def generate_outline_stream(
     data: Dict[str, Any],
@@ -1073,4 +1122,203 @@ async def generate_outline_stream(
     使用SSE流式生成完整大纲，避免超时
     """
     return create_sse_response(outline_generator(data, db, user_ai_service))
+
+
+async def world_building_regenerate_generator(
+    project_id: str,
+    data: Dict[str, Any],
+    db: AsyncSession,
+    user_ai_service: AIService
+) -> AsyncGenerator[str, None]:
+    """世界观重新生成流式生成器"""
+    db_committed = False
+    try:
+        yield await SSEResponse.send_progress("开始重新生成世界观...", 10)
+        
+        # 获取项目信息
+        result = await db.execute(
+            select(Project).where(Project.id == project_id)
+        )
+        project = result.scalar_one_or_none()
+        if not project:
+            yield await SSEResponse.send_error("项目不存在", 404)
+            return
+        
+        # 提取参数
+        provider = data.get("provider")
+        model = data.get("model")
+        enable_mcp = data.get("enable_mcp", True)
+        user_id = data.get("user_id")
+        
+        # 获取基础提示词
+        yield await SSEResponse.send_progress("准备AI提示词...", 15)
+        base_prompt = prompt_service.get_world_building_prompt(
+            title=project.title,
+            theme=project.theme or "未设定",
+            genre=project.genre or "通用"
+        )
+        
+        # MCP工具增强：收集参考资料
+        reference_materials = ""
+        if enable_mcp and user_id:
+            try:
+                from app.services.mcp_tool_service import mcp_tool_service
+                available_tools = await mcp_tool_service.get_user_enabled_tools(
+                    user_id=user_id,
+                    db_session=db
+                )
+                
+                if available_tools:
+                    yield await SSEResponse.send_progress("🔍 尝试使用MCP工具收集参考资料...", 18)
+                    
+                    planning_prompt = f"""你正在为小说《{project.title}》重新设计世界观。
+
+【小说信息】
+- 题材：{project.genre}
+- 主题：{project.theme}
+- 简介：{project.description or '未设定'}
+
+【任务】
+请使用可用工具搜索相关背景资料，帮助构建更真实、更有深度的世界观设定。
+你可以查询：
+1. 历史背景（如果是历史题材）
+2. 地理环境和文化特征
+3. 相关领域的专业知识
+4. 类似作品的设定参考
+
+请查询最关键的1个问题（不要超过1个）。"""
+                    
+                    planning_result = await user_ai_service.generate_text_with_mcp(
+                        prompt=planning_prompt,
+                        user_id=user_id,
+                        db_session=db,
+                        enable_mcp=True,
+                        max_tool_rounds=1,
+                        tool_choice="auto",
+                        provider=None,
+                        model=None
+                    )
+                    
+                    if planning_result.get("tool_calls_made", 0) > 0:
+                        yield await SSEResponse.send_progress(
+                            f"✅ MCP工具调用成功（{planning_result['tool_calls_made']}次）",
+                            25
+                        )
+                        reference_materials = planning_result.get("content", "")
+                    else:
+                        logger.debug("MCP工具可用但AI未选择使用")
+                else:
+                    logger.debug(f"用户 {user_id} 未启用MCP工具，跳过MCP增强")
+                    
+            except Exception as e:
+                logger.warning(f"MCP工具调用失败（降级处理）: {e}")
+                yield await SSEResponse.send_progress("⚠️ MCP工具暂时不可用，使用基础模式", 25)
+        
+        # 构建增强提示词
+        if reference_materials:
+            enhanced_prompt = f"""{base_prompt}
+
+【参考资料】
+以下是通过MCP工具收集的真实背景资料，请参考这些信息构建更真实的世界观：
+
+{reference_materials}
+
+请结合上述资料，生成符合历史/现实的世界观设定。"""
+            final_prompt = enhanced_prompt
+            yield await SSEResponse.send_progress("💡 已整合参考资料，开始生成世界观...", 30)
+        else:
+            final_prompt = base_prompt
+            yield await SSEResponse.send_progress("正在调用AI生成...", 30)
+        
+        # 流式生成世界观
+        accumulated_text = ""
+        chunk_count = 0
+        
+        async for chunk in user_ai_service.generate_text_stream(
+            prompt=final_prompt,
+            provider=provider,
+            model=model
+        ):
+            chunk_count += 1
+            accumulated_text += chunk
+            
+            yield await SSEResponse.send_chunk(chunk)
+            
+            if chunk_count % 5 == 0:
+                progress = min(30 + (chunk_count // 5), 70)
+                yield await SSEResponse.send_progress(f"生成中... ({len(accumulated_text)}字符)", progress)
+            
+            if chunk_count % 20 == 0:
+                yield await SSEResponse.send_heartbeat()
+        
+        # 解析结果
+        yield await SSEResponse.send_progress("解析AI返回结果...", 80)
+        
+        world_data = {}
+        try:
+            cleaned_text = accumulated_text.strip()
+            
+            if cleaned_text.startswith('```json'):
+                cleaned_text = cleaned_text[7:].lstrip('\n\r')
+            elif cleaned_text.startswith('```'):
+                cleaned_text = cleaned_text[3:].lstrip('\n\r')
+            if cleaned_text.endswith('```'):
+                cleaned_text = cleaned_text[:-3].rstrip('\n\r')
+            cleaned_text = cleaned_text.strip()
+            
+            world_data = json.loads(cleaned_text)
+                    
+        except json.JSONDecodeError as e:
+            logger.error(f"世界构建JSON解析失败: {e}")
+            world_data = {
+                "time_period": "AI返回格式错误，请重试",
+                "location": "AI返回格式错误，请重试",
+                "atmosphere": "AI返回格式错误，请重试",
+                "rules": "AI返回格式错误，请重试"
+            }
+        
+        # 不保存到数据库，仅返回生成结果供用户预览
+        yield await SSEResponse.send_progress("生成完成，等待用户确认...", 90)
+        
+        # 发送最终结果（不包含project_id，表示未保存）
+        yield await SSEResponse.send_result({
+            "time_period": world_data.get("time_period"),
+            "location": world_data.get("location"),
+            "atmosphere": world_data.get("atmosphere"),
+            "rules": world_data.get("rules")
+        })
+        
+        yield await SSEResponse.send_progress("完成!", 100, "success")
+        yield await SSEResponse.send_done()
+        
+    except GeneratorExit:
+        logger.warning("世界观重新生成器被提前关闭")
+        if not db_committed and db.in_transaction():
+            await db.rollback()
+            logger.info("世界观重新生成事务已回滚（GeneratorExit）")
+    except Exception as e:
+        logger.error(f"世界观重新生成失败: {str(e)}")
+        if not db_committed and db.in_transaction():
+            await db.rollback()
+            logger.info("世界观重新生成事务已回滚（异常）")
+        yield await SSEResponse.send_error(f"生成失败: {str(e)}")
+
+
+@router.post("/world-building/{project_id}/regenerate", summary="流式重新生成世界观")
+async def regenerate_world_building_stream(
+    project_id: str,
+    request: Request,
+    data: Dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+    user_ai_service: AIService = Depends(get_user_ai_service)
+):
+    """
+    使用SSE流式重新生成世界观，避免超时
+    前端使用EventSource接收实时进度和结果
+    """
+    # 从中间件注入user_id到data中
+    if hasattr(request.state, 'user_id'):
+        data['user_id'] = request.state.user_id
+    return create_sse_response(world_building_regenerate_generator(project_id, data, db, user_ai_service))
+
 

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.0.2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.5-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-green.svg)
 ![React](https://img.shields.io/badge/react-18.3.1-blue.svg)
@@ -11,6 +11,20 @@
 **基于 AI 的智能小说创作助手**
 
 [特性](#-特性) • [快速开始](#-快速开始) • [配置说明](#%EF%B8%8F-配置说明) • [项目结构](#-项目结构)
+
+</div>
+
+---
+
+<div align="center">
+
+## 💖 支持项目
+
+如果这个项目对你有帮助，欢迎通过以下方式支持开发：
+
+**[☕ 请我喝杯咖啡](https://mumuverse.space:1588/)**
+
+您的支持是我持续开发的动力！🙏
 
 </div>
 
@@ -383,6 +397,7 @@ MuMuAINovel/
 - 提交 [Issue](https://github.com/xiamuceer-j/MuMuAINovel/issues)
 - Linux DO [讨论](https://linux.do/t/topic/1106333)
 - 加入QQ群 [QQ群](frontend/public/qq.jpg)
+- 加入WX群 [WX群](frontend/public/WX.jpg)
 
 ---
 

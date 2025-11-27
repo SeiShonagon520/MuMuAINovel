@@ -1,20 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Input, Button, Space, Typography, message, Spin, Progress } from 'antd';
-import { SendOutlined, ArrowLeftOutlined, CheckCircleOutlined, LoadingOutlined, RocketOutlined } from '@ant-design/icons';
-import { inspirationApi, wizardStreamApi } from '../services/api';
-import type { ApiError } from '../types';
+import { Card, Input, Button, Space, Typography, message, Spin } from 'antd';
+import { SendOutlined, ArrowLeftOutlined } from '@ant-design/icons';
+import { inspirationApi } from '../services/api';
+import { AIProjectGenerator, type GenerationConfig } from '../components/AIProjectGenerator';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
-type Step = 'idea' | 'title' | 'description' | 'theme' | 'genre' | 'perspective' | 'confirm' | 'generating' | 'complete';
+type Step = 'idea' | 'title' | 'description' | 'theme' | 'genre' | 'perspective' | 'outline_mode' | 'confirm' | 'generating' | 'complete';
 
 interface Message {
   type: 'ai' | 'user';
   content: string;
   options?: string[];
   isMultiSelect?: boolean;
+  optionsDisabled?: boolean; // 标记选项是否已禁用
 }
 
 interface WizardData {
@@ -23,7 +24,23 @@ interface WizardData {
   theme: string;
   genre: string[];
   narrative_perspective: string;
+  outline_mode: 'one-to-one' | 'one-to-many';
 }
+
+// 缓存数据接口
+interface CacheData {
+  messages: Message[];
+  currentStep: Step;
+  wizardData: Partial<WizardData>;
+  initialIdea: string;
+  selectedOptions: string[];
+  timestamp: number;
+}
+
+// 缓存键
+const CACHE_KEY = 'inspiration_conversation_cache';
+// 缓存有效期：24小时
+const CACHE_EXPIRY = 24 * 60 * 60 * 1000;
 
 const Inspiration: React.FC = () => {
   const navigate = useNavigate();
@@ -43,26 +60,8 @@ const Inspiration: React.FC = () => {
   // 保存用户的原始想法，用于保持上下文一致性
   const [initialIdea, setInitialIdea] = useState<string>('');
   
-  // 项目生成状态
-  const [projectId, setProjectId] = useState<string>('');
-  const [projectTitle, setProjectTitle] = useState<string>('');
-  const [progress, setProgress] = useState(0);
-  const [progressMessage, setProgressMessage] = useState('');
-  const [errorDetails, setErrorDetails] = useState<string>(''); // 新增：错误详情
-  const [generationSteps, setGenerationSteps] = useState<{
-    worldBuilding: 'pending' | 'processing' | 'completed' | 'error';
-    characters: 'pending' | 'processing' | 'completed' | 'error';
-    outline: 'pending' | 'processing' | 'completed' | 'error';
-  }>({
-    worldBuilding: 'pending',
-    characters: 'pending',
-    outline: 'pending'
-  });
-  
-  // 新增：保存生成数据，用于重试
-  const [generationData, setGenerationData] = useState<WizardData | null>(null);
-  // 保存世界观生成结果，用于后续步骤
-  const [worldBuildingResult, setWorldBuildingResult] = useState<any>(null);
+  // 生成配置
+  const [generationConfig, setGenerationConfig] = useState<GenerationConfig | null>(null);
   
   // 滚动容器引用
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -74,9 +73,114 @@ const Inspiration: React.FC = () => {
     context: Partial<WizardData>;
   } | null>(null);
 
-  // 自动滚动到底部 - 使用更丝滑的方式
+  // 标记是否已经加载缓存
+  const [cacheLoaded, setCacheLoaded] = useState(false);
+
+  // ==================== 缓存管理函数 ====================
+  
+  // 保存到缓存
+  const saveToCache = () => {
+    try {
+      // 只在对话阶段保存，生成阶段不保存
+      if (currentStep === 'generating' || currentStep === 'complete') {
+        return;
+      }
+      
+      // 只有用户有输入时才保存（至少两条消息：AI问候+用户回复）
+      if (messages.length <= 1) {
+        return;
+      }
+
+      const cacheData: CacheData = {
+        messages,
+        currentStep,
+        wizardData,
+        initialIdea,
+        selectedOptions,
+        timestamp: Date.now()
+      };
+      
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+      console.log('💾 对话已自动保存');
+    } catch (error) {
+      console.error('保存缓存失败:', error);
+    }
+  };
+
+  // 从缓存恢复
+  const restoreFromCache = (): boolean => {
+    try {
+      const cached = localStorage.getItem(CACHE_KEY);
+      if (!cached) {
+        return false;
+      }
+
+      const cacheData: CacheData = JSON.parse(cached);
+      const age = Date.now() - cacheData.timestamp;
+
+      // 检查缓存是否过期
+      if (age > CACHE_EXPIRY) {
+        console.log('⏰ 缓存已过期，清除');
+        clearCache();
+        return false;
+      }
+
+      // 必须有有效的对话数据
+      if (!cacheData.messages || cacheData.messages.length <= 1) {
+        return false;
+      }
+
+      // 恢复所有状态
+      setMessages(cacheData.messages);
+      setCurrentStep(cacheData.currentStep);
+      setWizardData(cacheData.wizardData);
+      setInitialIdea(cacheData.initialIdea);
+      setSelectedOptions(cacheData.selectedOptions);
+
+      console.log('✅ 已恢复上次的对话进度');
+      message.success('已恢复上次的对话进度', 2);
+      return true;
+    } catch (error) {
+      console.error('恢复缓存失败:', error);
+      clearCache();
+      return false;
+    }
+  };
+
+  // 清除缓存
+  const clearCache = () => {
+    try {
+      localStorage.removeItem(CACHE_KEY);
+      console.log('🗑️ 缓存已清除');
+    } catch (error) {
+      console.error('清除缓存失败:', error);
+    }
+  };
+
+  // ==================== 组件挂载时恢复缓存 ====================
+  
+  useEffect(() => {
+    if (!cacheLoaded) {
+      restoreFromCache();
+      setCacheLoaded(true);
+    }
+  }, []);
+
+  // ==================== 自动保存：状态变化时保存 ====================
+  
+  useEffect(() => {
+    // 防抖保存
+    const timer = setTimeout(() => {
+      if (cacheLoaded) {
+        saveToCache();
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [messages, currentStep, wizardData, initialIdea, selectedOptions, cacheLoaded]);
+
+  // 自动滚动到底部
   const scrollToBottom = () => {
-    // 使用 setTimeout 确保 DOM 已更新
     setTimeout(() => {
       if (chatContainerRef.current) {
         chatContainerRef.current.scrollTo({
@@ -108,7 +212,6 @@ const Inspiration: React.FC = () => {
         return;
       }
 
-      // 移除失败消息，添加成功的AI消息
       setMessages(prev => {
         const newMessages = [...prev];
         if (newMessages[newMessages.length - 1].type === 'ai' &&
@@ -136,7 +239,7 @@ const Inspiration: React.FC = () => {
   };
 
   // 步骤顺序
-  const stepOrder: Step[] = ['idea', 'title', 'description', 'theme', 'genre', 'perspective', 'confirm'];
+  const stepOrder: Step[] = ['idea', 'title', 'description', 'theme', 'genre', 'perspective', 'outline_mode', 'confirm'];
 
   const handleSendMessage = async () => {
     if (!inputValue.trim()) {
@@ -156,7 +259,6 @@ const Inspiration: React.FC = () => {
 
     try {
       if (currentStep === 'idea') {
-        // 保存用户的原始想法
         setInitialIdea(userInput);
         
         const requestData = {
@@ -169,7 +271,6 @@ const Inspiration: React.FC = () => {
         
         const response = await inspirationApi.generateOptions(requestData);
 
-        // 前端格式校验：检查是否有错误或选项数量不足
         if (response.error || !response.options || response.options.length < 3) {
           const errorMessage: Message = {
             type: 'ai',
@@ -213,6 +314,7 @@ const Inspiration: React.FC = () => {
       return;
     }
     
+    // 对于多选类型，不立即禁用选项
     if (currentStep === 'genre') {
       const newSelected = selectedOptions.includes(option)
         ? selectedOptions.filter(o => o !== option)
@@ -221,18 +323,66 @@ const Inspiration: React.FC = () => {
       return;
     }
     
+    // 立即禁用当前消息的选项（单选场景）
+    setMessages(prev => {
+      const newMessages = [...prev];
+      const lastAiMessageIndex = newMessages.map((m, i) => m.type === 'ai' && m.options ? i : -1).filter(i => i >= 0).pop();
+      if (lastAiMessageIndex !== undefined && lastAiMessageIndex >= 0) {
+        newMessages[lastAiMessageIndex] = {
+          ...newMessages[lastAiMessageIndex],
+          optionsDisabled: true
+        };
+      }
+      return newMessages;
+    });
+    
     if (currentStep === 'perspective') {
-      // 叙事视角是单选
       const userMessage: Message = {
         type: 'user',
         content: option,
       };
       setMessages(prev => [...prev, userMessage]);
       
-      const updatedData = { ...wizardData, narrative_perspective: option, genre: wizardData.genre || [] } as WizardData;
+      const updatedData = { ...wizardData, narrative_perspective: option };
       setWizardData(updatedData);
       
-      // 显示预览和确认选项
+      // 询问大纲模式
+      const aiMessage: Message = {
+        type: 'ai',
+        content: `很好！现在请选择你想要的大纲模式：
+
+📋 **一对一模式**：传统模式，一个大纲对应一个章节，适合结构清晰、章节独立的小说。
+
+📚 **一对多模式**：细化模式，一个大纲可以展开成多个章节，适合需要详细展开情节的小说。
+
+请选择：`,
+        options: ['📋 一对一模式', '📚 一对多模式']
+      };
+      setMessages(prev => [...prev, aiMessage]);
+      setCurrentStep('outline_mode');
+      return;
+    }
+    
+    if (currentStep === 'outline_mode') {
+      const userMessage: Message = {
+        type: 'user',
+        content: option,
+      };
+      setMessages(prev => [...prev, userMessage]);
+      
+      // 将选项转换为实际的模式值
+      const modeValue: 'one-to-one' | 'one-to-many' =
+        option === '📋 一对一模式' ? 'one-to-one' : 'one-to-many';
+      
+      const updatedData = {
+        ...wizardData,
+        outline_mode: modeValue,
+        genre: wizardData.genre || []
+      } as WizardData;
+      setWizardData(updatedData);
+      
+      // 显示摘要
+      const modeText = modeValue === 'one-to-one' ? '一对一模式' : '一对多模式';
       const summary = `
 太棒了！你的小说设定已完成，请确认：
 
@@ -241,6 +391,7 @@ const Inspiration: React.FC = () => {
 🎯 主题：${updatedData.theme}
 🏷️ 类型：${updatedData.genre.join('、')}
 👁️ 视角：${updatedData.narrative_perspective}
+📋 大纲模式：${modeText}
 
 请选择下一步操作：
       `.trim();
@@ -269,8 +420,24 @@ const Inspiration: React.FC = () => {
         };
         setMessages(prev => [...prev, aiMessage]);
         
+        // 清除缓存（对话完成，进入生成阶段）
+        clearCache();
+        
         // 开始生成项目
-        await handleAutoGenerate(wizardData as WizardData);
+        const data = wizardData as WizardData;
+        const config: GenerationConfig = {
+          title: data.title,
+          description: data.description,
+          theme: data.theme,
+          genre: data.genre,
+          narrative_perspective: data.narrative_perspective,
+          target_words: 100000,
+          chapter_count: 3,
+          character_count: 5,
+          outline_mode: data.outline_mode,
+        };
+        setGenerationConfig(config);
+        setCurrentStep('generating');
         return;
       } else if (option === '🔄 重新开始') {
         handleRestart();
@@ -320,6 +487,11 @@ const Inspiration: React.FC = () => {
         updatedData.genre = [input];
       } else if (currentStep === 'perspective') {
         updatedData.narrative_perspective = input;
+      } else if (currentStep === 'outline_mode') {
+        // 大纲模式不支持自定义输入
+        message.warning('请从选项中选择一个大纲模式');
+        setLoading(false);
+        return;
       }
       
       setWizardData(updatedData);
@@ -332,444 +504,24 @@ const Inspiration: React.FC = () => {
     }
   };
 
-  // 自动化生成项目流程
-  const handleAutoGenerate = async (data: WizardData) => {
-    try {
-      setLoading(true);
-      setCurrentStep('generating');
-      setProjectTitle(data.title);
-      setProgress(0);
-      setProgressMessage('开始创建项目...');
-      setErrorDetails(''); // 清空错误详情
-      setGenerationData(data); // 保存数据用于重试
-
-      // 步骤1: 生成世界观并创建项目
-      setGenerationSteps(prev => ({ ...prev, worldBuilding: 'processing' }));
-      setProgressMessage('正在生成世界观...');
-      
-      const worldResult = await wizardStreamApi.generateWorldBuildingStream(
-        {
-          title: data.title,
-          description: data.description,
-          theme: data.theme,
-          genre: data.genre.join('、'),
-          narrative_perspective: data.narrative_perspective,
-          target_words: 100000,
-          chapter_count: 5,
-          character_count: 5,
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: (result) => {
-            setProjectId(result.project_id);
-            setWorldBuildingResult(result); // 保存世界观结果
-            setGenerationSteps(prev => ({ ...prev, worldBuilding: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('世界观生成失败:', error);
-            setErrorDetails(`世界观生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, worldBuilding: 'error' }));
-            setLoading(false); // 确保错误时解除加载状态
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('世界观生成完成');
-          }
-        }
-      );
-
-      if (!worldResult?.project_id) {
-        throw new Error('项目创建失败：未获取到项目ID');
-      }
-
-      const createdProjectId = worldResult.project_id;
-      setProjectId(createdProjectId);
-      setWorldBuildingResult(worldResult); // 保存世界观结果
-
-      // 步骤2: 生成角色
-      setGenerationSteps(prev => ({ ...prev, characters: 'processing' }));
-      setProgressMessage('正在生成角色...');
-      
-      await wizardStreamApi.generateCharactersStream(
-        {
-          project_id: createdProjectId,
-          count: 5,
-          world_context: {
-            time_period: worldResult.time_period || '',
-            location: worldResult.location || '',
-            atmosphere: worldResult.atmosphere || '',
-            rules: worldResult.rules || '',
-          },
-          theme: data.theme,
-          genre: data.genre.join('、'),
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(33 + Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: (result) => {
-            console.log(`成功生成${result.characters?.length || 0}个角色`);
-            setGenerationSteps(prev => ({ ...prev, characters: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('角色生成失败:', error);
-            setErrorDetails(`角色生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, characters: 'error' }));
-            setLoading(false); // 确保错误时解除加载状态
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('角色生成完成');
-          }
-        }
-      );
-
-      // 步骤3: 生成大纲
-      setGenerationSteps(prev => ({ ...prev, outline: 'processing' }));
-      setProgressMessage('正在生成大纲...');
-      
-      await wizardStreamApi.generateCompleteOutlineStream(
-        {
-          project_id: createdProjectId,
-          chapter_count: 3,
-          narrative_perspective: data.narrative_perspective,
-          target_words: 100000,
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(66 + Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: () => {
-            console.log('大纲生成完成');
-            setGenerationSteps(prev => ({ ...prev, outline: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('大纲生成失败:', error);
-            setErrorDetails(`大纲生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, outline: 'error' }));
-            setLoading(false); // 确保错误时解除加载状态
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('大纲生成完成');
-          }
-        }
-      );
-
-      // 全部完成
-      setProgress(100);
-      setProgressMessage('项目创建完成！');
-      setCurrentStep('complete');
-      message.success('项目创建成功！');
-      
-    } catch (error) {
-      const apiError = error as ApiError;
-      const errorMsg = apiError.response?.data?.detail || apiError.message || '未知错误';
-      console.error('创建项目失败:', errorMsg);
-      setErrorDetails(errorMsg);
-      message.error('创建项目失败：' + errorMsg);
-      // 不重置步骤，保持在generating状态以显示重试按钮
-      setLoading(false); // 确保在错误时也设置loading为false
-    }
-  };
-
-  // 智能重试：从失败的步骤继续生成
-  const handleSmartRetry = async () => {
-    if (!generationData) {
-      message.warning('缺少生成数据');
-      return;
-    }
-
-    setLoading(true);
-    setErrorDetails('');
-
-    try {
-      // 判断从哪个步骤开始重试
-      if (generationSteps.worldBuilding === 'error') {
-        // 世界观失败，从世界观开始重新生成
-        message.info('从世界观步骤开始重新生成...');
-        await retryFromWorldBuilding();
-      } else if (generationSteps.characters === 'error') {
-        // 角色失败，从角色开始生成
-        message.info('从角色步骤继续生成...');
-        await retryFromCharacters();
-      } else if (generationSteps.outline === 'error') {
-        // 大纲失败，从大纲开始生成
-        message.info('从大纲步骤继续生成...');
-        await retryFromOutline();
-      }
-    } catch (error: any) {
-      console.error('智能重试失败:', error);
-      message.error('重试失败：' + (error.message || '未知错误'));
-      setLoading(false);
-    }
-  };
-
-  // 从世界观步骤重新开始
-  const retryFromWorldBuilding = async () => {
-    if (!generationData) return;
-
-    setGenerationSteps(prev => ({ ...prev, worldBuilding: 'processing' }));
-    setProgressMessage('重新生成世界观...');
-
-    try {
-      const worldResult = await wizardStreamApi.generateWorldBuildingStream(
-        {
-          title: generationData.title,
-          description: generationData.description,
-          theme: generationData.theme,
-          genre: generationData.genre.join('、'),
-          narrative_perspective: generationData.narrative_perspective,
-          target_words: 100000,
-          chapter_count: 5,
-          character_count: 5,
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: (result) => {
-            setProjectId(result.project_id);
-            setWorldBuildingResult(result);
-            setGenerationSteps(prev => ({ ...prev, worldBuilding: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('世界观生成失败:', error);
-            setErrorDetails(`世界观生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, worldBuilding: 'error' }));
-            setLoading(false);
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('世界观重新生成完成');
-          }
-        }
-      );
-
-      if (!worldResult?.project_id) {
-        throw new Error('项目创建失败：未获取到项目ID');
-      }
-
-      // 继续生成角色和大纲
-      await continueFromCharacters(worldResult);
-    } catch (error: any) {
-      throw error;
-    }
-  };
-
-  // 从角色步骤继续
-  const retryFromCharacters = async () => {
-    if (!generationData || !projectId || !worldBuildingResult) {
-      message.warning('缺少必要数据，无法从角色步骤继续');
-      setLoading(false);
-      return;
-    }
-
-    setGenerationSteps(prev => ({ ...prev, characters: 'processing' }));
-    setProgressMessage('重新生成角色...');
-
-    try {
-      await wizardStreamApi.generateCharactersStream(
-        {
-          project_id: projectId,
-          count: 5,
-          world_context: {
-            time_period: worldBuildingResult.time_period || '',
-            location: worldBuildingResult.location || '',
-            atmosphere: worldBuildingResult.atmosphere || '',
-            rules: worldBuildingResult.rules || '',
-          },
-          theme: generationData.theme,
-          genre: generationData.genre.join('、'),
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(33 + Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: (result) => {
-            console.log(`成功生成${result.characters?.length || 0}个角色`);
-            setGenerationSteps(prev => ({ ...prev, characters: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('角色生成失败:', error);
-            setErrorDetails(`角色生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, characters: 'error' }));
-            setLoading(false);
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('角色重新生成完成');
-          }
-        }
-      );
-
-      // 继续生成大纲
-      await continueFromOutline();
-    } catch (error: any) {
-      throw error;
-    }
-  };
-
-  // 从大纲步骤继续
-  const retryFromOutline = async () => {
-    if (!generationData || !projectId) {
-      message.warning('缺少必要数据，无法从大纲步骤继续');
-      setLoading(false);
-      return;
-    }
-
-    setGenerationSteps(prev => ({ ...prev, outline: 'processing' }));
-    setProgressMessage('重新生成大纲...');
-
-    try {
-      await wizardStreamApi.generateCompleteOutlineStream(
-        {
-          project_id: projectId,
-          chapter_count: 5,
-          narrative_perspective: generationData.narrative_perspective,
-          target_words: 100000,
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(66 + Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: () => {
-            console.log('大纲生成完成');
-            setGenerationSteps(prev => ({ ...prev, outline: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('大纲生成失败:', error);
-            setErrorDetails(`大纲生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, outline: 'error' }));
-            setLoading(false);
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('大纲重新生成完成');
-          }
-        }
-      );
-
-      // 全部完成
-      setProgress(100);
-      setProgressMessage('项目创建完成！');
-      setCurrentStep('complete');
-      message.success('项目创建成功！');
-      setLoading(false);
-    } catch (error: any) {
-      throw error;
-    }
-  };
-
-  // 从角色步骤开始的完整流程（世界观成功后调用）
-  const continueFromCharacters = async (worldResult: any) => {
-    if (!generationData || !worldResult?.project_id) return;
-
-    try {
-      // 生成角色
-      setGenerationSteps(prev => ({ ...prev, characters: 'processing' }));
-      setProgressMessage('正在生成角色...');
-
-      await wizardStreamApi.generateCharactersStream(
-        {
-          project_id: worldResult.project_id,
-          count: 5,
-          world_context: {
-            time_period: worldResult.time_period || '',
-            location: worldResult.location || '',
-            atmosphere: worldResult.atmosphere || '',
-            rules: worldResult.rules || '',
-          },
-          theme: generationData.theme,
-          genre: generationData.genre.join('、'),
-        },
-        {
-          onProgress: (msg, prog) => {
-            setProgress(33 + Math.floor(prog / 3));
-            setProgressMessage(msg);
-          },
-          onResult: (result) => {
-            console.log(`成功生成${result.characters?.length || 0}个角色`);
-            setGenerationSteps(prev => ({ ...prev, characters: 'completed' }));
-          },
-          onError: (error) => {
-            console.error('角色生成失败:', error);
-            setErrorDetails(`角色生成失败: ${error}`);
-            setGenerationSteps(prev => ({ ...prev, characters: 'error' }));
-            setLoading(false);
-            throw new Error(error);
-          },
-          onComplete: () => {
-            console.log('角色生成完成');
-          }
-        }
-      );
-
-      // 生成大纲
-      await continueFromOutline();
-    } catch (error: any) {
-      console.error('继续生成失败:', error);
-      throw error;
-    }
-  };
-
-  // 从大纲步骤开始的完整流程（角色成功后调用）
-  const continueFromOutline = async () => {
-    if (!generationData || !projectId) return;
-
-    setGenerationSteps(prev => ({ ...prev, outline: 'processing' }));
-    setProgressMessage('正在生成大纲...');
-
-    await wizardStreamApi.generateCompleteOutlineStream(
-      {
-        project_id: projectId,
-        chapter_count: 5,
-        narrative_perspective: generationData.narrative_perspective,
-        target_words: 100000,
-      },
-      {
-        onProgress: (msg, prog) => {
-          setProgress(66 + Math.floor(prog / 3));
-          setProgressMessage(msg);
-        },
-        onResult: () => {
-          console.log('大纲生成完成');
-          setGenerationSteps(prev => ({ ...prev, outline: 'completed' }));
-        },
-        onError: (error) => {
-          console.error('大纲生成失败:', error);
-          setErrorDetails(`大纲生成失败: ${error}`);
-          setGenerationSteps(prev => ({ ...prev, outline: 'error' }));
-          setLoading(false);
-          throw new Error(error);
-        },
-        onComplete: () => {
-          console.log('大纲生成完成');
-        }
-      }
-    );
-
-    // 全部完成
-    setProgress(100);
-    setProgressMessage('项目创建完成！');
-    setCurrentStep('complete');
-    message.success('项目创建成功！');
-    setLoading(false);
-  };
-
   const handleConfirmGenres = async () => {
     if (selectedOptions.length === 0) {
       message.warning('请至少选择一个类型');
       return;
     }
+
+    // 禁用类型选择的选项
+    setMessages(prev => {
+      const newMessages = [...prev];
+      const lastAiMessageIndex = newMessages.map((m, i) => m.type === 'ai' && m.options ? i : -1).filter(i => i >= 0).pop();
+      if (lastAiMessageIndex !== undefined && lastAiMessageIndex >= 0) {
+        newMessages[lastAiMessageIndex] = {
+          ...newMessages[lastAiMessageIndex],
+          optionsDisabled: true
+        };
+      }
+      return newMessages;
+    });
 
     const userMessage: Message = {
       type: 'user',
@@ -781,12 +533,11 @@ const Inspiration: React.FC = () => {
     setWizardData(updatedData);
     setSelectedOptions([]);
     
-    // 进入叙事视角选择
     setLoading(true);
     try {
       const aiMessage: Message = {
         type: 'ai',
-        content: '很好！最后一步，请选择小说的叙事视角：',
+        content: '很好！接下来，请选择小说的叙事视角：',
         options: ['第一人称', '第三人称', '全知视角']
       };
       setMessages(prev => [...prev, aiMessage]);
@@ -810,7 +561,6 @@ const Inspiration: React.FC = () => {
       };
       const response = await inspirationApi.generateOptions(requestData);
 
-      // 前端格式校验
       if (response.error || !response.options || response.options.length < 3) {
         const errorMessage: Message = {
           type: 'ai',
@@ -844,7 +594,6 @@ const Inspiration: React.FC = () => {
       };
       const response = await inspirationApi.generateOptions(requestData);
 
-      // 前端格式校验
       if (response.error || !response.options || response.options.length < 3) {
         const errorMessage: Message = {
           type: 'ai',
@@ -879,7 +628,6 @@ const Inspiration: React.FC = () => {
       };
       const response = await inspirationApi.generateOptions(requestData);
 
-      // 前端格式校验
       if (response.error || !response.options || response.options.length < 3) {
         const errorMessage: Message = {
           type: 'ai',
@@ -907,6 +655,9 @@ const Inspiration: React.FC = () => {
   };
 
   const handleRestart = () => {
+    // 清除缓存
+    clearCache();
+    
     setCurrentStep('idea');
     setMessages([
       {
@@ -915,7 +666,7 @@ const Inspiration: React.FC = () => {
       }
     ]);
     setWizardData({});
-    setInitialIdea('');  // 重置原始想法
+    setInitialIdea('');
     setSelectedOptions([]);
     setLoading(false);
   };
@@ -924,145 +675,25 @@ const Inspiration: React.FC = () => {
     navigate('/projects');
   };
 
-  // 渲染生成进度页面
-  const renderGenerating = () => {
-    const getStepStatus = (step: 'pending' | 'processing' | 'completed' | 'error') => {
-      if (step === 'completed') return { icon: <CheckCircleOutlined />, color: '#52c41a' };
-      if (step === 'processing') return { icon: <LoadingOutlined />, color: '#1890ff' };
-      if (step === 'error') return { icon: '✗', color: '#ff4d4f' };
-      return { icon: '○', color: '#d9d9d9' };
-    };
-
-    const hasError = generationSteps.worldBuilding === 'error' ||
-                     generationSteps.characters === 'error' ||
-                     generationSteps.outline === 'error';
-
-    return (
-      <div style={{ textAlign: 'center', padding: '40px 20px' }}>
-        <Title level={3} style={{ marginBottom: 32, color: '#fff' }}>
-          正在为《{projectTitle}》生成内容
-        </Title>
-
-        <Card style={{ marginBottom: 24 }}>
-          <Progress
-            percent={progress}
-            status={hasError ? 'exception' : (progress === 100 ? 'success' : 'active')}
-            strokeColor={{
-              '0%': '#667eea',
-              '100%': '#764ba2',
-            }}
-            style={{ marginBottom: 24 }}
-          />
-
-          <Paragraph style={{ fontSize: 16, marginBottom: 32, color: hasError ? '#ff4d4f' : '#666' }}>
-            {progressMessage}
-          </Paragraph>
-
-          {/* 错误详情显示 */}
-          {errorDetails && (
-            <Card
-              size="small"
-              style={{
-                marginBottom: 24,
-                background: '#fff2f0',
-                borderColor: '#ffccc7',
-                textAlign: 'left'
-              }}
-            >
-              <Text strong style={{ color: '#ff4d4f' }}>错误详情：</Text>
-              <br />
-              <Text style={{ color: '#666', fontSize: 14 }}>{errorDetails}</Text>
-            </Card>
-          )}
-
-          <Space direction="vertical" size={16} style={{ width: '100%', maxWidth: 400, margin: '0 auto' }}>
-            {[
-              { key: 'worldBuilding', label: '生成世界观', step: generationSteps.worldBuilding },
-              { key: 'characters', label: '生成角色', step: generationSteps.characters },
-              { key: 'outline', label: '生成大纲', step: generationSteps.outline },
-            ].map(({ key, label, step }) => {
-              const status = getStepStatus(step);
-              return (
-                <div
-                  key={key}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '12px 20px',
-                    background: step === 'processing' ? '#f0f5ff' : (step === 'error' ? '#fff2f0' : '#fafafa'),
-                    borderRadius: 8,
-                    border: `1px solid ${step === 'processing' ? '#d6e4ff' : (step === 'error' ? '#ffccc7' : '#f0f0f0')}`,
-                  }}
-                >
-                  <Text style={{ fontSize: 16, fontWeight: step === 'processing' ? 600 : 400 }}>
-                    {label}
-                  </Text>
-                  <span style={{ fontSize: 20, color: status.color }}>
-                    {status.icon}
-                  </span>
-                </div>
-              );
-            })}
-          </Space>
-        </Card>
-
-        <Paragraph type="secondary" style={{ color: '#fff', opacity: 0.9 }}>
-          {hasError ? '生成过程中出现错误，请点击重试按钮重新生成' : '请耐心等待，AI正在为您精心创作...'}
-        </Paragraph>
-        
-        {hasError && (
-          <Space style={{ marginTop: 16 }}>
-            <Button
-              type="primary"
-              size="large"
-              onClick={handleSmartRetry}
-              loading={loading}
-              disabled={loading}
-            >
-              继续生成
-            </Button>
-          </Space>
-        )}
-      </div>
-    );
+  // 生成完成回调
+  const handleComplete = (projectId: string) => {
+    console.log('灵感模式项目创建完成:', projectId);
+    // 确保清除缓存
+    clearCache();
+    setCurrentStep('complete');
   };
 
-  // 渲染完成页面
-  const renderComplete = () => (
-    <div style={{ textAlign: 'center', padding: '40px 20px' }}>
-      <Card>
-        <div style={{ fontSize: 72, color: '#52c41a', marginBottom: 24 }}>
-          ✓
-        </div>
-        <Title level={2} style={{ color: '#52c41a', marginBottom: 16 }}>
-          项目创建完成！
-        </Title>
-        <Paragraph style={{ fontSize: 16, marginTop: 24, marginBottom: 48 }}>
-          《{projectTitle}》已成功创建，包含完整的世界观、角色和开局大纲
-        </Paragraph>
-        
-        <Space size={16}>
-          <Button size="large" onClick={() => navigate('/')}>
-            返回首页
-          </Button>
-          <Button
-            type="primary"
-            size="large"
-            icon={<RocketOutlined />}
-            onClick={() => navigate(`/project/${projectId}`)}
-          >
-            进入项目
-          </Button>
-        </Space>
-      </Card>
-    </div>
-  );
+  // 返回对话界面
+  const handleBackToChat = () => {
+    clearCache();
+    setCurrentStep('idea');
+    setGenerationConfig(null);
+    handleRestart();
+  };
 
   // 渲染对话界面
   const renderChat = () => (
     <>
-      {/* 对话区域 */}
       <Card
         ref={chatContainerRef}
         style={{
@@ -1106,7 +737,6 @@ const Inspiration: React.FC = () => {
                   {msg.content}
                 </Paragraph>
                 
-                {/* 选项卡片 */}
                 {msg.options && msg.options.length > 0 && (
                   <Space
                     direction="vertical"
@@ -1116,36 +746,42 @@ const Inspiration: React.FC = () => {
                     {msg.options.map((option, optIndex) => (
                       <Card
                         key={optIndex}
-                        hoverable
+                        hoverable={!msg.optionsDisabled}
                         size="small"
-                        onClick={() => handleSelectOption(option)}
+                        onClick={() => !msg.optionsDisabled && handleSelectOption(option)}
                         style={{
-                          cursor: 'pointer',
+                          cursor: msg.optionsDisabled ? 'not-allowed' : 'pointer',
                           border: msg.isMultiSelect && selectedOptions.includes(option)
                             ? '2px solid #1890ff'
                             : '1px solid #d9d9d9',
-                          background: msg.isMultiSelect && selectedOptions.includes(option)
+                          background: msg.optionsDisabled
+                            ? '#f5f5f5'
+                            : msg.isMultiSelect && selectedOptions.includes(option)
                             ? '#e6f7ff'
                             : '#fff',
+                          opacity: msg.optionsDisabled ? 0.6 : 1,
                           animation: 'floatIn 0.6s ease-out',
                           animationDelay: `${optIndex * 0.1}s`,
                           animationFillMode: 'both',
                           transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                         }}
                         onMouseEnter={(e) => {
-                          e.currentTarget.style.transform = 'translateY(-2px) scale(1.02)';
-                          e.currentTarget.style.boxShadow = '0 4px 12px rgba(24,144,255,0.2)';
+                          if (!msg.optionsDisabled) {
+                            e.currentTarget.style.transform = 'translateY(-2px) scale(1.02)';
+                            e.currentTarget.style.boxShadow = '0 4px 12px rgba(24,144,255,0.2)';
+                          }
                         }}
                         onMouseLeave={(e) => {
-                          e.currentTarget.style.transform = 'translateY(0) scale(1)';
-                          e.currentTarget.style.boxShadow = 'none';
+                          if (!msg.optionsDisabled) {
+                            e.currentTarget.style.transform = 'translateY(0) scale(1)';
+                            e.currentTarget.style.boxShadow = 'none';
+                          }
                         }}
                       >
                         {option}
                       </Card>
                     ))}
                     
-                    {/* 多选确认按钮 */}
                     {msg.isMultiSelect && (
                       <Button
                         type="primary"
@@ -1172,12 +808,10 @@ const Inspiration: React.FC = () => {
             </div>
           )}
           
-          {/* 滚动锚点 */}
           <div ref={messagesEndRef} />
         </Space>
       </Card>
 
-      {/* 输入区域 */}
       <Card
         style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
         styles={{ body: { padding: 12 } }}
@@ -1261,7 +895,6 @@ const Inspiration: React.FC = () => {
         `}
       </style>
       <div style={{ maxWidth: 800, margin: '0 auto' }}>
-        {/* 头部 */}
         <div style={{
           marginBottom: window.innerWidth <= 768 ? 12 : 24,
           position: 'relative'
@@ -1308,16 +941,22 @@ const Inspiration: React.FC = () => {
           </div>
         </div>
 
-        {/* 根据当前步骤渲染不同内容 */}
         {(currentStep === 'idea' || currentStep === 'title' || currentStep === 'description' ||
           currentStep === 'theme' || currentStep === 'genre' || currentStep === 'perspective' ||
-          currentStep === 'confirm') && renderChat()}
-        {currentStep === 'generating' && renderGenerating()}
-        {currentStep === 'complete' && renderComplete()}
+          currentStep === 'outline_mode' || currentStep === 'confirm') && renderChat()}
+        {(currentStep === 'generating' || currentStep === 'complete') && generationConfig && (
+          <AIProjectGenerator
+            config={generationConfig}
+            storagePrefix="inspiration"
+            onComplete={handleComplete}
+            onBack={handleBackToChat}
+            isMobile={window.innerWidth <= 768}
+          />
+        )}
       </div>
     </div>
   );
 };
 
 export default Inspiration;
-              
+          

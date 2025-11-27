@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Empty, Modal, message, Spin, Row, Col, Statistic, Space, Tag, Progress, Typography, Tooltip, Badge, Alert, Upload, Checkbox, Divider, Switch, Dropdown } from 'antd';
-import { EditOutlined, DeleteOutlined, BookOutlined, RocketOutlined, CalendarOutlined, FileTextOutlined, TrophyOutlined, FireOutlined, SettingOutlined, InfoCircleOutlined, CloseOutlined, UploadOutlined, DownloadOutlined, ApiOutlined, MoreOutlined, BulbOutlined } from '@ant-design/icons';
+import { Card, Button, Empty, Modal, message, Spin, Row, Col, Statistic, Space, Tag, Progress, Typography, Tooltip, Badge, Alert, Upload, Checkbox, Divider, Switch, Dropdown, Form, Input, InputNumber } from 'antd';
+import { EditOutlined, DeleteOutlined, BookOutlined, RocketOutlined, CalendarOutlined, FileTextOutlined, TrophyOutlined, FireOutlined, SettingOutlined, InfoCircleOutlined, CloseOutlined, UploadOutlined, DownloadOutlined, ApiOutlined, MoreOutlined, BulbOutlined, LoadingOutlined } from '@ant-design/icons';
 import { projectApi } from '../services/api';
 import { useStore } from '../store';
 import { useProjectSync } from '../store/hooks';
@@ -27,6 +27,10 @@ export default function ProjectList() {
     includeWritingStyles: true,
     includeGenerationHistory: true,
   });
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editingProject, setEditingProject] = useState<any>(null);
+  const [editForm] = Form.useForm();
+  const [updating, setUpdating] = useState(false);
 
   const { refreshProjects, deleteProject } = useProjectSync();
 
@@ -72,9 +76,54 @@ export default function ProjectList() {
     });
   };
 
-  const handleEnterProject = (id: string) => {
-    // 简化后直接进入项目，不再检查向导状态
-    navigate(`/project/${id}`);
+  const handleEditProject = (project: any) => {
+    setEditingProject(project);
+    editForm.setFieldsValue({
+      description: project.description || '',
+      target_words: project.target_words || 0,
+    });
+    setEditModalVisible(true);
+  };
+
+  const handleCloseEditModal = () => {
+    setEditModalVisible(false);
+    setEditingProject(null);
+    editForm.resetFields();
+  };
+
+  const handleUpdateProject = async () => {
+    try {
+      const values = await editForm.validateFields();
+      setUpdating(true);
+      
+      await projectApi.updateProject(editingProject.id, {
+        description: values.description,
+        target_words: values.target_words,
+      });
+      
+      message.success('项目更新成功');
+      handleCloseEditModal();
+      await refreshProjects();
+    } catch (error: any) {
+      if (error.errorFields) {
+        message.error('请检查表单填写');
+      } else {
+        message.error('更新失败，请重试');
+      }
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const handleEnterProject = async (project: any) => {
+    // 检查项目是否未完成生成(wizard_status为incomplete)
+    if (project.wizard_status === 'incomplete') {
+      // 未完成的项目跳转到生成页面继续生成
+      navigate(`/wizard?project_id=${project.id}`);
+    } else {
+      // 已完成的项目进入项目详情页
+      navigate(`/project/${project.id}`);
+    }
   };
 
   const getStatusTag = (status: string) => {
@@ -682,14 +731,16 @@ export default function ProjectList() {
                 return (
                   <Col {...gridConfig} key={project.id}>
                     <Badge.Ribbon
-                      text={getStatusTag(project.status)}
+                      text={project.wizard_status === 'incomplete' ? (
+                        <Tag color="orange" icon={<LoadingOutlined spin />}>生成中断</Tag>
+                      ) : getStatusTag(project.status)}
                       color="transparent"
                       style={{ top: 12, right: 12 }}
                     >
                       <Card
                         hoverable
                         variant="borderless"
-                        onClick={() => handleEnterProject(project.id)}
+                        onClick={() => handleEnterProject(project)}
                         style={cardStyles.project}
                         styles={{ body: { padding: 0, overflow: 'hidden' } }}
                         {...cardHoverHandlers}
@@ -750,7 +801,12 @@ export default function ProjectList() {
                                 borderRadius: 8
                               }}>
                                 <div style={{ fontSize: 20, fontWeight: 'bold', color: '#1890ff' }}>
-                                  {(project.current_words / 1000).toFixed(1)}K
+                                  {project.current_words >= 1000000
+                                    ? (project.current_words / 1000000).toFixed(1) + 'M'
+                                    : project.current_words >= 1000
+                                    ? (project.current_words / 1000).toFixed(1) + 'K'
+                                    : project.current_words
+                                  }
                                 </div>
                                 <Text type="secondary" style={{ fontSize: 12 }}>已写字数</Text>
                               </div>
@@ -763,7 +819,14 @@ export default function ProjectList() {
                                 borderRadius: 8
                               }}>
                                 <div style={{ fontSize: 20, fontWeight: 'bold', color: '#52c41a' }}>
-                                  {project.target_words ? (project.target_words / 1000).toFixed(0) + 'K' : '--'}
+                                  {project.target_words
+                                    ? (project.target_words >= 1000000
+                                      ? (project.target_words / 1000000).toFixed(1) + 'M'
+                                      : project.target_words >= 1000
+                                      ? (project.target_words / 1000).toFixed(1) + 'K'
+                                      : project.target_words)
+                                    : '--'
+                                  }
                                 </div>
                                 <Text type="secondary" style={{ fontSize: 12 }}>目标字数</Text>
                               </div>
@@ -783,15 +846,26 @@ export default function ProjectList() {
                               {formatDate(project.updated_at)}
                             </Text>
                             <Space size={8}>
+                              <Tooltip title="编辑">
+                                <Button
+                                  type="text"
+                                  size="small"
+                                  icon={<EditOutlined />}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleEditProject(project);
+                                  }}
+                                />
+                              </Tooltip>
                               <Tooltip title="删除">
-                                <Button 
-                                  type="text" 
+                                <Button
+                                  type="text"
                                   size="small"
                                   danger
                                   icon={<DeleteOutlined />}
-                                  onClick={(e) => { 
-                                    e.stopPropagation(); 
-                                    handleDelete(project.id); 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDelete(project.id);
                                   }}
                                 />
                               </Tooltip>
@@ -1085,6 +1159,65 @@ export default function ProjectList() {
             />
           )}
         </Space>
+      </Modal>
+
+      {/* 编辑项目对话框 */}
+      <Modal
+        title={`编辑项目: ${editingProject?.title || ''}`}
+        open={editModalVisible}
+        onOk={handleUpdateProject}
+        onCancel={handleCloseEditModal}
+        confirmLoading={updating}
+        okText="保存"
+        cancelText="取消"
+        width={window.innerWidth <= 768 ? '90%' : 600}
+        centered
+        styles={{
+          body: {
+            maxHeight: window.innerWidth <= 768 ? '60vh' : 'auto',
+            overflowY: 'auto',
+            padding: window.innerWidth <= 768 ? '16px' : '24px'
+          }
+        }}
+      >
+        <Form
+          form={editForm}
+          layout="vertical"
+          autoComplete="off"
+        >
+          <Form.Item
+            label="项目简介"
+            name="description"
+            rules={[
+              { max: 1000, message: '简介不能超过1000字' }
+            ]}
+          >
+            <Input.TextArea
+              rows={4}
+              placeholder="请输入项目简介（选填）"
+              showCount
+              maxLength={1000}
+            />
+          </Form.Item>
+
+          <Form.Item
+            label="目标字数"
+            name="target_words"
+            rules={[
+              { type: 'number', min: 0, message: '目标字数不能为负数' },
+              { type: 'number', max: 2147483647, message: '目标字数超出范围' }
+            ]}
+          >
+            <InputNumber
+              style={{ width: '100%' }}
+              placeholder="请输入目标字数（选填，最大21亿字）"
+              min={0}
+              max={2147483647}
+              step={1000}
+              addonAfter="字"
+            />
+          </Form.Item>
+        </Form>
       </Modal>
 
     </div>
