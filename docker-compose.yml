@@ -62,7 +62,6 @@ services:
       - "${APP_PORT:-8000}:8000"
     volumes:
       - ./logs:/app/logs
-      - ./.env:/app/.env:ro
     environment:
       # 应用配置
       - APP_NAME=${APP_NAME:-MuMuAINovel}
@@ -82,10 +81,10 @@ services:
       - DATABASE_POOL_PRE_PING=${DATABASE_POOL_PRE_PING:-True}
       - DATABASE_POOL_USE_LIFO=${DATABASE_POOL_USE_LIFO:-True}
       
-      # 代理配置（可选）
-      - HTTP_PROXY=${HTTP_PROXY:-}
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
-      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+      # 代理配置
+      - HTTP_PROXY=http://host.docker.internal:7897
+      - HTTPS_PROXY=http://host.docker.internal:7897
+      - NO_PROXY=localhost,127.0.0.1,postgres,apis.iflow.cn
       
       # AI 服务配置
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -95,7 +94,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
       - DEFAULT_AI_PROVIDER=${DEFAULT_AI_PROVIDER:-openai}
-      - DEFAULT_MODEL=${DEFAULT_MODEL:-gpt-4o-mini}
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-qwen3-max}
       - DEFAULT_TEMPERATURE=${DEFAULT_TEMPERATURE:-0.7}
       - DEFAULT_MAX_TOKENS=${DEFAULT_MAX_TOKENS:-2000}
       
@@ -114,6 +113,10 @@ services:
       # 会话配置
       - SESSION_EXPIRE_MINUTES=${SESSION_EXPIRE_MINUTES:-120}
       - SESSION_REFRESH_THRESHOLD_MINUTES=${SESSION_REFRESH_THRESHOLD_MINUTES:-30}
+      # 取消离线模式，允许下载模型
+      - TRANSFORMERS_OFFLINE=0
+      - HF_DATASETS_OFFLINE=0
+      - HF_HUB_OFFLINE=0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

@@ -43,12 +43,58 @@
 
 ## 🚀 快速开始
 
-### 前置要求
+### 30秒快速启动（已配置用户）
 
-- Docker 和 Docker Compose
-- 至少一个 AI 服务的 API Key（OpenAI/Gemini/Claude）
+```bash
+# 启动服务
+docker-compose up -d
 
-### Docker Compose 部署（推荐）
+# 访问应用
+# 浏览器打开 http://localhost:8000
+```
+
+### 首次部署完整步骤
+
+#### 前置要求
+
+- **Docker Desktop** 已安装并运行
+- 至少一个 AI 服务的 API Key（OpenAI/Gemini/Claude 或兼容的中转服务）
+
+#### 部署步骤
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/xiamuceer-j/MuMuAINovel.git
+cd MuMuAINovel
+
+# 2. 创建配置文件
+cp backend/.env.example .env
+
+# 3. 编辑 .env 文件，填入你的 API 配置
+#    必填项：
+#    - OPENAI_API_KEY=你的API密钥
+#    - OPENAI_BASE_URL=API地址（如 https://api.openai.com/v1）
+#    - LOCAL_AUTH_PASSWORD=登录密码
+
+# 4. 启动服务
+docker-compose up -d
+
+# 5. 等待约 1 分钟让服务完全启动，然后访问
+#    http://localhost:8000
+```
+
+### 常用命令速查
+
+| 命令 | 说明 |
+|------|------|
+| `docker-compose up -d` | 启动服务 |
+| `docker-compose down` | 停止服务 |
+| `docker-compose restart` | 重启服务 |
+| `docker-compose logs -f` | 查看实时日志 |
+| `docker-compose ps` | 查看服务状态 |
+| `docker-compose pull && docker-compose up -d` | 更新到最新版本 |
+
+### Docker Compose 部署（详细说明）
 
 ```bash
 # 1. 克隆项目

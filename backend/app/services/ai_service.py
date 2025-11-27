@@ -701,9 +701,10 @@ class AIService:
                 finish_reason = None
                 
                 async for line in response.aiter_lines():
-                    if line.startswith('data: '):
-                        data_str = line[6:]
-                        if data_str.strip() == '[DONE]':
+                    # 兼容 "data: " 和 "data:" 两种格式
+                    if line.startswith('data:'):
+                        data_str = line[5:].lstrip()  # 去掉 "data:" 和可能的空格
+                        if data_str == '[DONE]':
                             break
                         
                         try:

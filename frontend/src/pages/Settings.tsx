@@ -74,7 +74,12 @@ export default function SettingsPage() {
   const handleSave = async (values: SettingsUpdate) => {
     setLoading(true);
     try {
-      await settingsApi.saveSettings(values);
+      // 处理 mode="tags" 返回的数组格式
+      const processedValues = {
+        ...values,
+        llm_model: Array.isArray(values.llm_model) ? values.llm_model[0] : values.llm_model
+      };
+      await settingsApi.saveSettings(processedValues);
       message.success('设置已保存');
       setHasSettings(true);
       setIsDefaultSettings(false);
@@ -401,7 +406,7 @@ export default function SettingsPage() {
                   label={
                     <Space size={4}>
                       <span>模型名称</span>
-                      <Tooltip title="AI模型的名称，如 gpt-4, gpt-3.5-turbo">
+                      <Tooltip title="AI模型的名称，如 gpt-4, qwen3-max">
                         <InfoCircleOutlined style={{ color: '#8c8c8c', fontSize: isMobile ? '12px' : '14px' }} />
                       </Tooltip>
                     </Space>
@@ -412,7 +417,9 @@ export default function SettingsPage() {
                   <Select
                     size={isMobile ? 'middle' : 'large'}
                     showSearch
-                    placeholder={isMobile ? "选择模型" : "输入模型名称或点击获取"}
+                    mode="tags"
+                    maxCount={1}
+                    placeholder={isMobile ? "输入或选择模型" : "输入模型名称或点击获取"}
                     optionFilterProp="label"
                     loading={fetchingModels}
                     onFocus={handleModelSelectFocus}
