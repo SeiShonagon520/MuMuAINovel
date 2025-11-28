@@ -26,6 +26,27 @@ router = APIRouter(prefix="/wizard-stream", tags=["项目创建向导(流式)"])
 logger = get_logger(__name__)
 
 
+def fix_json_string(text: str) -> str:
+    """
+    修复 AI 生成的常见 JSON 格式问题
+    例如: "title": 灰烬中的份额轮换制" -> "title": "灰烬中的份额轮换制"
+    """
+    # 修复缺少开头引号的字符串值: "key": value" -> "key": "value"
+    # 匹配模式: "key": 非引号开头的中文或英文字符...后面跟着引号结尾
+    fixed = re.sub(
+        r'("[\w_]+"\s*:\s*)([^"\[\]{},\d\s][^"]*?")',
+        r'\1"\2',
+        text
+    )
+    # 修复值为中文开头但缺少引号的情况: "key": 中文..." -> "key": "中文..."
+    fixed = re.sub(
+        r'("[\w_]+"\s*:\s*)([\u4e00-\u9fff][^",\]\}]*)(,|\]|\})',
+        r'\1"\2"\3',
+        fixed
+    )
+    return fixed
+
+
 async def world_building_generator(
     data: Dict[str, Any],
     db: AsyncSession,
@@ -174,6 +195,10 @@ async def world_building_generator(
         world_data = {}
         try:
             cleaned_text = accumulated_text.strip()
+            
+            # 移除 qwen3 等模型的思考过程标签 <think>...</think>
+            cleaned_text = re.sub(r'<think>.*?</think>', '', cleaned_text, flags=re.DOTALL)
+            cleaned_text = cleaned_text.strip()
             
             # 移除markdown代码块标记
             if cleaned_text.startswith('```json'):
@@ -492,6 +517,11 @@ async def characters_generator(
                     
                     # 解析批次结果
                     cleaned_text = accumulated_text.strip()
+                    
+                    # 移除 qwen3 等模型的思考过程标签 <think>...</think>
+                    cleaned_text = re.sub(r'<think>.*?</think>', '', cleaned_text, flags=re.DOTALL)
+                    cleaned_text = cleaned_text.strip()
+                    
                     # 移除markdown代码块标记
                     if cleaned_text.startswith('```json'):
                         cleaned_text = cleaned_text[7:].lstrip('\n\r')
@@ -982,6 +1012,11 @@ async def outline_generator(
         # 解析大纲结果
         yield await SSEResponse.send_progress("解析大纲...", 40)
         cleaned_text = accumulated_text.strip()
+        
+        # 移除 qwen3 等模型的思考过程标签 <think>...</think>
+        cleaned_text = re.sub(r'<think>.*?</think>', '', cleaned_text, flags=re.DOTALL)
+        cleaned_text = cleaned_text.strip()
+        
         if cleaned_text.startswith('```json'):
             cleaned_text = cleaned_text[7:].lstrip('\n\r')
         elif cleaned_text.startswith('```'):
@@ -995,9 +1030,19 @@ async def outline_generator(
             if not isinstance(outline_data, list):
                 outline_data = [outline_data]
         except json.JSONDecodeError as e:
-            logger.error(f"大纲JSON解析失败: {e}")
-            yield await SSEResponse.send_error("大纲生成失败，请重试")
-            return
+            # 第一次解析失败，尝试修复 JSON 格式
+            logger.warning(f"大纲JSON首次解析失败，尝试修复: {e}")
+            try:
+                fixed_text = fix_json_string(cleaned_text)
+                outline_data = json.loads(fixed_text)
+                if not isinstance(outline_data, list):
+                    outline_data = [outline_data]
+                logger.info("✅ JSON修复成功")
+            except json.JSONDecodeError as e2:
+                logger.error(f"大纲JSON修复后仍解析失败: {e2}")
+                logger.error(f"清理后的文本前200字符: {cleaned_text[:200] if len(cleaned_text) > 200 else cleaned_text}")
+                yield await SSEResponse.send_error("大纲生成失败，请重试")
+                return
         
         # 保存大纲到数据库
         yield await SSEResponse.send_progress("保存大纲到数据库...", 45)
@@ -1257,6 +1302,10 @@ async def world_building_regenerate_generator(
         world_data = {}
         try:
             cleaned_text = accumulated_text.strip()
+            
+            # 移除 qwen3 等模型的思考过程标签 <think>...</think>
+            cleaned_text = re.sub(r'<think>.*?</think>', '', cleaned_text, flags=re.DOTALL)
+            cleaned_text = cleaned_text.strip()
             
             if cleaned_text.startswith('```json'):
                 cleaned_text = cleaned_text[7:].lstrip('\n\r')

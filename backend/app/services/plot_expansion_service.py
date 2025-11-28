@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 import json
+import re
 
 from app.models.outline import Outline
 from app.models.project import Project
@@ -422,13 +423,10 @@ class PlotExpansionService:
         """获取大纲的上下文（前后大纲）"""
         # 获取前一个大纲
         prev_result = await db.execute(
-            select(Outline)
-            .where(
+            select(Outline).where(
                 Outline.project_id == project_id,
                 Outline.order_index < outline.order_index
-            )
-            .order_by(Outline.order_index.desc())
-            .limit(1)
+            ).order_by(Outline.order_index.desc()).limit(1)
         )
         prev_outline = prev_result.scalar_one_or_none()
         
@@ -714,6 +712,11 @@ class PlotExpansionService:
         try:
             # 清理响应文本
             cleaned_text = ai_response.strip()
+            
+            # 移除 qwen3 等模型的思考过程标签 <think>...</think>
+            cleaned_text = re.sub(r'<think>.*?</think>', '', cleaned_text, flags=re.DOTALL)
+            cleaned_text = cleaned_text.strip()
+            
             if cleaned_text.startswith('```json'):
                 cleaned_text = cleaned_text[7:]
             if cleaned_text.startswith('```'):
@@ -722,8 +725,21 @@ class PlotExpansionService:
                 cleaned_text = cleaned_text[:-3]
             cleaned_text = cleaned_text.strip()
             
+            # 尝试修复常见的 JSON 格式问题（如缺少引号）
+            def fix_json_string(text: str) -> str:
+                # 修复缺少开头引号的字符串值
+                fixed = re.sub(r'("[\w_]+"\s*:\s*)([^"\[\]{},\d\s][^"]*?")', r'\1"\2', text)
+                fixed = re.sub(r'("[\w_]+"\s*:\s*)([\u4e00-\u9fff][^",\]\}]*)(,|\]|\})', r'\1"\2"\3', fixed)
+                return fixed
+            
             # 解析JSON
-            chapter_plans = json.loads(cleaned_text)
+            try:
+                chapter_plans = json.loads(cleaned_text)
+            except json.JSONDecodeError:
+                # 尝试修复后再解析
+                fixed_text = fix_json_string(cleaned_text)
+                chapter_plans = json.loads(fixed_text)
+                logger.info("JSON修复成功")
             
             # 确保是列表
             if not isinstance(chapter_plans, list):
