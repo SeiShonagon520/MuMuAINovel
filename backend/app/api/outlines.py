@@ -174,7 +174,7 @@ async def update_outline(
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """更新大纲信息并同步更新structure字段"""
+    """更新大纲信息并同步更新structure字段和关联章节"""
     result = await db.execute(
         select(Outline).where(Outline.id == outline_id)
     )
@@ -185,7 +185,7 @@ async def update_outline(
     
     # 验证用户权限
     user_id = getattr(request.state, 'user_id', None)
-    await verify_project_access(outline.project_id, user_id, db)
+    project = await verify_project_access(outline.project_id, user_id, db)
     
     # 更新字段
     update_data = outline_update.model_dump(exclude_unset=True)
@@ -213,6 +213,28 @@ async def update_outline(
             logger.info(f"同步更新大纲 {outline_id} 的structure字段")
         except json.JSONDecodeError:
             logger.warning(f"大纲 {outline_id} 的structure字段格式错误，跳过更新")
+    
+    # 🔧 传统模式（one-to-one）：同步更新关联章节的标题
+    if 'title' in update_data and project.outline_mode == 'one-to-one':
+        try:
+            # 查找对应的章节（通过chapter_number匹配order_index）
+            chapter_result = await db.execute(
+                select(Chapter).where(
+                    Chapter.project_id == outline.project_id,
+                    Chapter.chapter_number == outline.order_index
+                )
+            )
+            chapter = chapter_result.scalar_one_or_none()
+            
+            if chapter:
+                # 同步更新章节标题
+                chapter.title = outline.title
+                logger.info(f"一对一模式：同步更新章节 {chapter.id} 的标题为 '{outline.title}'")
+            else:
+                logger.debug(f"一对一模式：未找到对应的章节（chapter_number={outline.order_index}）")
+        except Exception as e:
+            logger.error(f"同步更新章节标题失败: {str(e)}")
+            # 不阻断大纲更新流程，仅记录错误
     
     await db.commit()
     await db.refresh(outline)
@@ -485,12 +507,24 @@ async def _generate_new_outline(
     # 解析响应
     outline_data = _parse_ai_response(ai_content)
     
-    # 全新生成模式：必须删除旧大纲（章节不自动删除，由用户手动管理）
-    # 注意：这是"new"模式的核心逻辑，应该始终删除旧数据
-    logger.info(f"删除项目 {project.id} 的旧大纲")
-    await db.execute(
-        delete(Outline).where(Outline.project_id == project.id)
+    # 全新生成模式：删除旧大纲和关联的所有章节
+    logger.info(f"全新生成：删除项目 {project.id} 的旧大纲和章节（outline_mode: {project.outline_mode}）")
+    
+    from sqlalchemy import delete as sql_delete
+    
+    # 先删除所有旧章节（无论是一对一还是一对多模式）
+    delete_result = await db.execute(
+        sql_delete(Chapter).where(Chapter.project_id == project.id)
     )
+    deleted_chapters_count = delete_result.rowcount
+    logger.info(f"✅ 全新生成：删除了 {deleted_chapters_count} 个旧章节")
+    
+    # 再删除所有旧大纲
+    delete_outline_result = await db.execute(
+        sql_delete(Outline).where(Outline.project_id == project.id)
+    )
+    deleted_outlines_count = delete_outline_result.rowcount
+    logger.info(f"✅ 全新生成：删除了 {deleted_outlines_count} 个旧大纲")
     
     # 保存新大纲
     outlines = await _save_outlines(
@@ -1084,12 +1118,25 @@ async def new_outline_generator(
         # 解析响应
         outline_data = _parse_ai_response(ai_content)
         
-        # 删除旧大纲（章节不自动删除，由用户手动管理）
-        yield await SSEResponse.send_progress("清理旧大纲...", 75)
-        logger.info(f"删除项目 {project_id} 的旧大纲")
-        await db.execute(
-            delete(Outline).where(Outline.project_id == project_id)
+        # 全新生成模式：删除旧大纲和关联的所有章节
+        yield await SSEResponse.send_progress("清理旧大纲和章节...", 75)
+        logger.info(f"全新生成：删除项目 {project_id} 的旧大纲和章节（outline_mode: {project.outline_mode}）")
+        
+        from sqlalchemy import delete as sql_delete
+        
+        # 先删除所有旧章节
+        delete_chapters_result = await db.execute(
+            sql_delete(Chapter).where(Chapter.project_id == project_id)
         )
+        deleted_chapters_count = delete_chapters_result.rowcount
+        logger.info(f"✅ 全新生成：删除了 {deleted_chapters_count} 个旧章节")
+        
+        # 再删除所有旧大纲
+        delete_outlines_result = await db.execute(
+            sql_delete(Outline).where(Outline.project_id == project_id)
+        )
+        deleted_outlines_count = delete_outlines_result.rowcount
+        logger.info(f"✅ 全新生成：删除了 {deleted_outlines_count} 个旧大纲")
         
         # 保存新大纲
         yield await SSEResponse.send_progress("💾 保存大纲到数据库...", 80)
